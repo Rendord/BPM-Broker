@@ -14,7 +14,7 @@ SPOTIPY_REDIRECT_URI = "http://127.0.0.1:3000"
 MUSICBRAINZ_ENDPOINT = "https://musicbrainz.org/ws/2/recording/"
 ACOUSTICBRAINZ_ENDPOINT = "https://acousticbrainz.org/api/v1/"
 
-# Define the scopes needed
+# Define the scopes needed #TODO bring back scopes to what is purely necessary
 SCOPE = "user-library-read playlist-modify-public playlist-modify-private playlist-read-collaborative playlist-read-private user-read-email user-read-private user-read-playback-state user-read-currently-playing"
 
 # Initialize Spotipy
@@ -25,6 +25,13 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID,
 
 # Get user ID
 user_id = sp.me()["id"]
+
+non_bpm_playlists = [] # list of ID's 
+
+bpm_playlists = {} # key BPM -> ID
+
+#playlist_tracks
+
 
 def is_valid_track(sp, track_id):
     try:
@@ -95,7 +102,7 @@ def fetch_acousticbrainz_data(mbid):
 
 def get_liked_songs():
     songs = []
-    results = handle_spotify_exception(sp.current_user_saved_tracks, limit=10)
+    results = handle_spotify_exception(sp.current_user_saved_tracks, limit=50)
     while results:
         for item in results["items"]:
             track = item["track"]
@@ -104,7 +111,7 @@ def get_liked_songs():
             for artist in track["artists"]:
                 artists.append(artist["name"])
             songs.append((track["id"], track["name"], artists[0], track["album"]["name"]))
-        results = sp.next(results) if results["next"] else None
+        results = handle_spotify_exception(sp.next, results) if results["next"] else None
     return songs
 
 def get_track_bpm(track_id):
@@ -140,9 +147,21 @@ def get_track_bpm(track_id):
 
     return bpm
 
-def create_playlist(name):
-    playlist = sp.user_playlist_create(user=user_id, name=name, public=False)
-    return playlist["id"]
+def get_or_create_playlist(name):
+    if name in bpm_playlists.keys:
+        return bpm_playlists.get(name)
+    else:
+        playlist = sp.user_playlist_create(user=user_id, name=name, public=False)
+        bpm_playlists[name] = playlist["id"]
+        return playlist["id"]
+    
+def retrieve_playlists():
+    user_playlists = sp.user_playlists(user_id, limit=50)
+
+    while user_playlists:
+        for item in user_playlists["items"]:
+            if item["name"] == "BPM":
+                
 
 def sort_songs_by_exact_bpm():
     liked_songs = get_liked_songs()
@@ -163,7 +182,7 @@ def sort_songs_by_exact_bpm():
     
     for bpm_category, tracks in categorized_tracks.items():
         if tracks:
-            playlist_id = create_playlist(bpm_category)
+            playlist_id = get_or_create_playlist(bpm_category)
             sp.playlist_add_items(playlist_id, tracks)
             print(f"Added {len(tracks)} songs to {bpm_category}")
 

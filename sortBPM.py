@@ -150,11 +150,10 @@ def sort_songs_by_exact_bpm():
     categorized_tracks = {}
     
     for track_id, track_name in liked_songs:
-        bpm = get_track_bpm(track_id) #this is where i was at
+        bpm = get_track_bpm(track_id)
         
-        if bpm is None:
-            print(f"Skipping track: {track_name} ({track_id})")
-            continue
+        if bpm == 0:
+            print(f"No acousticbrainz BPM for: {track_name} ({track_id})")
         
         bpm_category = f"BPM {round(bpm)}"
         if bpm_category not in categorized_tracks:

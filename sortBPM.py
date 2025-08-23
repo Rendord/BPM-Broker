@@ -5,10 +5,12 @@ import time
 import json
 import requests
 import urllib.parse
+import re
+import os
 
 # Set up authentication
-SPOTIPY_CLIENT_ID = "***REMOVED***"
-SPOTIPY_CLIENT_SECRET = "***REMOVED***"
+SPOTIPY_CLIENT_ID = os.getenv('spotify_client_id')
+SPOTIPY_CLIENT_SECRET = os.getenv('')
 SPOTIPY_REDIRECT_URI = "http://127.0.0.1:3000"
 
 MUSICBRAINZ_ENDPOINT = "https://musicbrainz.org/ws/2/recording/"
@@ -28,8 +30,10 @@ user_id = sp.me()["id"]
 
 non_bpm_playlists = [] # list of ID's 
 
-bpm_playlists = {} # key BPM -> ID
+bpm_playlists = {} # key BPM -> ID playlist
 
+track_dictionary = {} # playlist ID -> list of track ID's
+ 
 #playlist_tracks
 
 
@@ -84,7 +88,7 @@ def handle_rate_limited_request(url, sleep_time=1.5, max_retries=10):
             return None
         
     print("Max retries reached")
-
+#query=recording:Creep AND artist:Radiohead AND release:Pablo Honey AND NOT comment:live&limit=1&fmt=json
 def build_query(title, artist, album=None):
     query_parts = [f"recording:{title}", f"artist:{artist}", "NOT comment:live"]
     if album:
@@ -100,6 +104,16 @@ def fetch_acousticbrainz_data(mbid):
     url = f"{ACOUSTICBRAINZ_ENDPOINT}{mbid}/low-level"
     return handle_rate_limited_request(url)
 
+def get_x_liked_songs(amount, max=50):
+    if amount > max:
+        amount = 50
+    songs = []
+    results = handle_spotify_exception(sp.current_user_saved_tracks, limit=amount)
+    for item in results["items"]:
+            track = item["track"]
+            songs.append((track["id"], track["name"]))
+    return songs
+
 def get_liked_songs():
     songs = []
     results = handle_spotify_exception(sp.current_user_saved_tracks, limit=50)
@@ -107,10 +121,7 @@ def get_liked_songs():
         for item in results["items"]:
             track = item["track"]
             #print(json.dumps(track, indent=4))
-            artists = []
-            for artist in track["artists"]:
-                artists.append(artist["name"])
-            songs.append((track["id"], track["name"], artists[0], track["album"]["name"]))
+            songs.append((track["id"], track["name"]))
         results = handle_spotify_exception(sp.next, results) if results["next"] else None
     return songs
 
@@ -147,24 +158,67 @@ def get_track_bpm(track_id):
 
     return bpm
 
-def get_or_create_playlist(name):
-    if name in bpm_playlists.keys:
-        return bpm_playlists.get(name)
+def get_or_create_playlist(name, bpm):
+    if bpm in bpm_playlists.keys():
+        return bpm_playlists.get(bpm)
     else:
         playlist = sp.user_playlist_create(user=user_id, name=name, public=False)
-        bpm_playlists[name] = playlist["id"]
+        bpm_playlists[bpm] = playlist["id"]
         return playlist["id"]
     
 def retrieve_playlists():
-    user_playlists = sp.user_playlists(user_id, limit=50)
+    user_playlists = handle_spotify_exception(sp.user_playlists, user_id, limit=50)
 
     while user_playlists:
         for item in user_playlists["items"]:
-            if item["name"] == "BPM":
-                
+            if re.search(r"^BPM [0-9][0-9]?[0-9]?$", item["name"]):
+                bpm = int(re.search(r"[0-9][0-9]?[0-9]?", item["name"]).group())
+                #print(bpm)
+                if bpm not in bpm_playlists.keys():
+                    bpm_playlists[bpm] = item["id"]
+                    #print(item["id"])
+            else:
+                non_bpm_playlists.append(item["id"])
+        user_playlists = handle_spotify_exception(sp.next, user_playlists) if user_playlists["next"] else None
+
+def get_playlist_tracks(id):
+    results = handle_spotify_exception(sp.playlist_tracks, id, fields="items.track.id,next", limit=100, additional_types=('track'))
+    track_ids = []
+    while results:
+        for track in results["items"]:
+            track_ids.append(track["track"]["id"])
+        results = handle_spotify_exception(sp.next, results) if results["next"] else None
+    return track_ids
+
+# go through playlists and get tracks 
+# get_tracks_playlist
+# while tracks:
+# for item in tracks
+#   get_track bpm
+
+def safe_add_tracks(sp, playlist_id, track_uris):
+    batch_size = 100
+    for i in range(0, len(track_uris), batch_size):
+        batch = track_uris[i:i + batch_size]
+        while True:
+            try:
+                sp.playlist_add_items(playlist_id, batch)
+                break
+            except SpotifyException as e:
+                if e.http_status == 429:
+                    retry_after = int(e.headers.get("Retry-After", 5))
+                    print(f"⚠️ Rate limited. Retrying in {retry_after} seconds...")
+                    time.sleep(retry_after)
+                else:
+                    raise  # re-raise other errors
+
+def remove_duplicates(playlist_track_ids, new_tracks):
+    playlist_set = set(playlist_track_ids)
+    return list(set(new_tracks) - playlist_set)
 
 def sort_songs_by_exact_bpm():
     liked_songs = get_liked_songs()
+    #liked_songs = get_x_liked_songs(30)
 
     categorized_tracks = {}
     
@@ -174,20 +228,28 @@ def sort_songs_by_exact_bpm():
         if bpm == 0:
             print(f"No acousticbrainz BPM for: {track_name} ({track_id})")
         
-        bpm_category = f"BPM {round(bpm)}"
-        if bpm_category not in categorized_tracks:
-            categorized_tracks[bpm_category] = []
+        if bpm not in categorized_tracks:
+            categorized_tracks[bpm] = []
         
-        categorized_tracks[bpm_category].append(track_id)
+        categorized_tracks[bpm].append(track_id)
     
-    for bpm_category, tracks in categorized_tracks.items():
-        if tracks:
-            playlist_id = get_or_create_playlist(bpm_category)
-            sp.playlist_add_items(playlist_id, tracks)
-            print(f"Added {len(tracks)} songs to {bpm_category}")
+    for bpm, tracks in categorized_tracks.items():
+        playlist_name = f"BPM {bpm}"
+        playlist_id = get_or_create_playlist(playlist_name, bpm)
+        if playlist_id not in track_dictionary.keys():
+            track_dictionary[playlist_id] = get_playlist_tracks(playlist_id)
+
+        unique_new_tracks = remove_duplicates(track_dictionary[playlist_id], tracks)
+        if unique_new_tracks:
+            safe_add_tracks(sp, playlist_id, unique_new_tracks)
+            print(f"Added {len(unique_new_tracks)} songs to {playlist_name}")
+        else:
+            print(f"⚠️ Skipping playlist {playlist_id} — no new tracks to add.")
+        
+        #print(bpm_playlists)
+        #print(track_dictionary)
 
 def print_first_few_tracks():
-    
     liked_songs = get_liked_songs()
     for track in liked_songs[:10]:
         print(f"ID: {track[0]} Title: {track[1]} Artist: {track[2]} Album: {track[3]}")
@@ -195,5 +257,6 @@ def print_first_few_tracks():
 
 
 
-print_first_few_tracks()
-#sort_songs_by_exact_bpm()
+#print_first_few_tracks()
+retrieve_playlists()
+sort_songs_by_exact_bpm()
